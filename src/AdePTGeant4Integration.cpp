@@ -274,6 +274,9 @@ void AdePTGeant4Integration::ProcessGPUStep(std::span<const GPUHit> gpuSteps, bo
     // Attention!!! The reference parentTData to the hostTrackDataMapper will be invalidated by inserting a new element
     // via create()! Therefore, the g4id that is needed as a parent ID for the secondaries must be saved before!
     const auto parentID = parentTData.g4id;
+    // cpuAncestorG4id propagates the chain: if the parent is already GPU-created, use its
+    // CPU ancestor; otherwise the parent is a CPU-tracked particle and IS the CPU ancestor.
+    const auto cpuAncestorID = parentTData.cpuAncestorG4id > 0 ? parentTData.cpuAncestorG4id : parentTData.g4id;
 
     // the steps after the first one in the span are the initializing steps for the secondaries
     std::span<const GPUHit> secondaries = gpuSteps.subspan(1);
@@ -285,6 +288,7 @@ void AdePTGeant4Integration::ProcessGPUStep(std::span<const GPUHit> gpuSteps, bo
 
       // 2. Initialize from parent
       InitSecondaryHostTrackDataFromParent(&secStep, secTData, parentID,
+                                           cpuAncestorID,
                                            *fScoringObjects->fPreG4TouchableHistoryHandle);
 
       // 3. Construct G4Track in place
@@ -429,7 +433,8 @@ G4TouchableHandle AdePTGeant4Integration::MakeTouchableFromNavState(vecgeom::Nav
 }
 
 void AdePTGeant4Integration::InitSecondaryHostTrackDataFromParent(GPUHit const *secHit, HostTrackData &secTData,
-                                                                  int g4ParentID, G4TouchableHandle &preTouchable) const
+                                                                  int g4ParentID, int cpuAncestorG4id,
+                                                                  G4TouchableHandle &preTouchable) const
 {
 #ifdef DEBUG
   if (secHit->fStepCounter != 0) {
@@ -450,8 +455,9 @@ void AdePTGeant4Integration::InitSecondaryHostTrackDataFromParent(GPUHit const *
   }
 #endif
 
-  secTData.particleType = secHit->fParticleType;
-  secTData.g4parentid   = g4ParentID;
+  secTData.particleType    = secHit->fParticleType;
+  secTData.g4parentid      = g4ParentID;
+  secTData.cpuAncestorG4id = cpuAncestorG4id;
 
 #ifdef ADEPT_USE_ORIGINNAVSTATE
   secTData.originNavState = secHit->fPostStepPoint.fNavigationState;
@@ -493,7 +499,9 @@ void AdePTGeant4Integration::FillG4Track(GPUHit const *aGPUHit, G4Track *aTrack,
   dyn->SetPrimaryParticle(hostTData.primary);
 
   aTrack->SetTrackID(hostTData.g4id);          // Real data
-  aTrack->SetParentID(hostTData.g4parentid);   // ID of the initial particle that entered AdePT
+  // Use the nearest CPU-tracked ancestor as parent ID (same reasoning as in ReturnTrack).
+  aTrack->SetParentID(hostTData.cpuAncestorG4id > 0 ? hostTData.cpuAncestorG4id
+                                                     : hostTData.g4parentid);
   aTrack->SetPosition(aPostStepPointPosition); // Real data
   aTrack->SetGlobalTime(aGPUHit->fGlobalTime); // Real data
   aTrack->SetLocalTime(aGPUHit->fLocalTime);   // Real data
@@ -695,7 +703,12 @@ void AdePTGeant4Integration::ReturnTrack(adeptint::TrackData const &track, unsig
   leakedTrack->IncrementCurrentStepNumber();
 
   leakedTrack->SetTrackID(hostTData.g4id);
-  leakedTrack->SetParentID(hostTData.g4parentid);
+  // Use the nearest CPU-tracked ancestor as the parent ID so that DD4hep's particle
+  // handler can resolve the parent chain.  Deep GPU secondaries (GPU parent → GPU child)
+  // would otherwise carry a GPU-assigned parentID that was never registered with the
+  // particle handler, causing a "No real particle parent present" FATAL error.
+  leakedTrack->SetParentID(hostTData.cpuAncestorG4id > 0 ? hostTData.cpuAncestorG4id
+                                                          : hostTData.g4parentid);
 
   leakedTrack->SetUserInformation(hostTData.userTrackInfo);
   leakedTrack->SetCreatorProcess(hostTData.creatorProcess);
