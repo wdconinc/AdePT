@@ -22,7 +22,8 @@ class G4PrimaryParticle;
 /// @brief A helper struct to store the data that is stored exclusively on the CPU
 struct HostTrackData {
   int g4id                               = 0; // the Geant4 track ID
-  int g4parentid                         = 0; // the Geant4 parent ID
+  int g4parentid                         = 0; // the Geant4 parent ID (may be GPU-assigned for deep secondaries)
+  int cpuAncestorG4id                    = 0; // G4 ID of the nearest CPU-tracked ancestor (first non-GPU entry point)
   uint64_t gpuId                         = 0; // the GPU’s 64-bit track ID
   G4PrimaryParticle *primary             = nullptr;
   G4VProcess *creatorProcess             = nullptr;
@@ -130,6 +131,7 @@ public:
     HostTrackData &d = hostDataVec.back();
     d.gpuId          = gpuId;
     d.g4id           = g4id; // preserve CPU id for reproducibility
+    d.cpuAncestorG4id = g4id; // CPU-tracked particle is its own CPU ancestor
 
     // Reverse map: only touch if missing
     if (!haveReverse) {

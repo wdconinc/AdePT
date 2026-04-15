@@ -79,7 +79,7 @@ private:
   G4Track *ConstructSecondaryTrackInPlace(GPUHit const *secHit) const;
 
   void InitSecondaryHostTrackDataFromParent(GPUHit const *secHit, HostTrackData &secTData, int g4ParentID,
-                                            G4TouchableHandle &preTouchable) const;
+                                            int cpuAncestorG4id, G4TouchableHandle &preTouchable) const;
 
   void FillG4Track(GPUHit const *aGPUHit, G4Track *aG4Track, const HostTrackData &hostTData,
                    G4TouchableHandle &aPreG4TouchableHandle, G4TouchableHandle &aPostG4TouchableHandle) const;
