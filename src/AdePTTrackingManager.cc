@@ -564,7 +564,7 @@ void AdePTTrackingManager::ProcessTrack(G4Track *aTrack)
 
       fAdeptTransport->AddTrack(pdg, gpuTrackID, gpuParentID, energy, particlePosition[0], particlePosition[1],
                                 particlePosition[2], particleDirection[0], particleDirection[1], particleDirection[2],
-                                globalTime, localTime, properTime, weight, stepNumber, GetAdePTThreadId(),
+                                globalTime, localTime, properTime, weight, stepNumber, threadId,
                                 eventID, std::move(converted));
 
       fTrackCounter++; // increment the track counter for AdePT
