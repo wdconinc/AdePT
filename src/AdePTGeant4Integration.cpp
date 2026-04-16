@@ -291,8 +291,9 @@ G4Track *AdePTGeant4Integration::MakeReturnedTrackFromStep(GPUHit const &parentS
   // handler can resolve the parent chain.  Deep GPU secondaries (GPU parent → GPU child)
   // would otherwise carry a GPU-assigned parentID that was never registered with the
   // particle handler, causing a "No real particle parent present" FATAL error.
-  track->SetParentID(hostTData.cpuAncestorG4id > 0 ? hostTData.cpuAncestorG4id
-                                                    : hostTData.g4parentid);
+  track->SetParentID(hostTData.cpuAncestorG4id > 0 && hostTData.cpuAncestorG4id != hostTData.g4id
+                         ? hostTData.cpuAncestorG4id
+                         : hostTData.g4parentid);
   track->SetLocalTime(parentStep.fLocalTime);
   track->SetProperTime(parentStep.fProperTime);
   track->SetWeight(parentStep.fTrackWeight);
@@ -522,7 +523,9 @@ void AdePTGeant4Integration::ProcessGPUStep(std::span<const GPUHit> gpuSteps, bo
       G4TouchableHandle postTouchable;
       if (actions) {
         nuclearReactionTrack->SetTrackID(parentTDataAfterSecondaries.g4id);
-        nuclearReactionTrack->SetParentID(parentTDataAfterSecondaries.cpuAncestorG4id > 0
+        nuclearReactionTrack->SetParentID(parentTDataAfterSecondaries.cpuAncestorG4id > 0 &&
+                                                  parentTDataAfterSecondaries.cpuAncestorG4id !=
+                                                      parentTDataAfterSecondaries.g4id
                                               ? parentTDataAfterSecondaries.cpuAncestorG4id
                                               : parentTDataAfterSecondaries.g4parentid);
         nuclearReactionTrack->SetCreatorProcess(parentTDataAfterSecondaries.creatorProcess);
@@ -808,9 +811,13 @@ void AdePTGeant4Integration::FillG4Track(GPUHit const *aGPUHit, G4Track *aTrack,
   dyn->SetPrimaryParticle(hostTData.primary);
 
   aTrack->SetTrackID(hostTData.g4id);          // Real data
-  // Use the nearest CPU-tracked ancestor as parent ID (same reasoning as in ReturnTrack).
-  aTrack->SetParentID(hostTData.cpuAncestorG4id > 0 ? hostTData.cpuAncestorG4id
-                                                     : hostTData.g4parentid);
+  // For GPU-created secondaries, use cpuAncestorG4id as parent (their immediate GPU parent
+  // was never registered with the particle handler). For CPU-originated tracks returned
+  // from the GPU (cpuAncestorG4id == g4id), use g4parentid (the actual parent stored when
+  // the track was offloaded), to avoid a self-referential parent chain.
+  aTrack->SetParentID(hostTData.cpuAncestorG4id > 0 && hostTData.cpuAncestorG4id != hostTData.g4id
+                          ? hostTData.cpuAncestorG4id
+                          : hostTData.g4parentid);
   aTrack->SetPosition(aPostStepPointPosition); // Real data
   aTrack->SetGlobalTime(aGPUHit->fGlobalTime); // Real data
   aTrack->SetLocalTime(aGPUHit->fLocalTime);   // Real data
@@ -951,6 +958,7 @@ void AdePTGeant4Integration::FillG4Step(GPUHit const *aGPUHit, G4Step *aG4Step, 
   // aPostStepPoint->SetMagneticMoment(0);                                                            // Missing data
   // aPostStepPoint->SetWeight(0);                                                                    // Missing data
 }
+
 
 std::vector<float> AdePTGeant4Integration::GetUniformField() const
 {
