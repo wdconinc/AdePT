@@ -6,6 +6,7 @@
 
 #include <VecGeom/management/BVHManager.h>
 #include <VecGeom/management/GeoManager.h>
+#include <VecGeom/volumes/UnplacedBox.h>
 #ifdef ADEPT_USE_SURF
 #include <VecGeom/surfaces/BrepHelper.h>
 #endif
@@ -166,10 +167,39 @@ bool AdePTTransport::InitializeGeometry(const vecgeom::cxx::VPlacedVolume *world
   cudaManager.SynchronizeNavigationTable();
   adept::transport::detail::CopySurfaceModelToGPU();
 #else
+  // Before copying to GPU, replace any volume shapes that cannot be serialized
+  // to GPU (e.g. UnplacedTessellated) with conservative bounding-box
+  // approximations.  GPU tracks only navigate inside GPU-region volumes; they
+  // never enter tessellated HCal or similar structures, so a bounding box is
+  // functionally correct on the device side.
+  std::vector<std::pair<vecgeom::LogicalVolume *, vecgeom::VUnplacedVolume const *>> replacedVolumes;
+  {
+    std::vector<vecgeom::LogicalVolume *> allLV;
+    vecgeom::GeoManager::Instance().GetAllLogicalVolumes(allLV);
+    for (auto *lv : allLV) {
+      const auto *uv = lv->GetUnplacedVolume();
+      if (uv->GetType() == vecgeom::ESolidType::tessellated) {
+        vecgeom::Vector3D<vecgeom::Precision> aMin, aMax;
+        uv->Extent(aMin, aMax);
+        const auto half = (aMax - aMin) * 0.5;
+        auto *bbox      = new vecgeom::UnplacedBox(std::abs(half.x()), std::abs(half.y()), std::abs(half.z()));
+        replacedVolumes.push_back({lv, lv->SetUnplacedVolume(bbox)});
+      }
+    }
+    if (!replacedVolumes.empty())
+      std::cout << "AdePT: Replaced " << replacedVolumes.size()
+                << " tessellated volume(s) with bounding boxes for GPU geometry copy\n";
+  }
+
   cudaManager.LoadGeometry(world);
   auto world_dev = cudaManager.Synchronize();
   success        = world_dev != nullptr;
   InitBVH();
+
+  // Restore original CPU-side unplaced volumes; GPU retains the bounding-box copies.
+  for (auto &[lv, original] : replacedVolumes) {
+    delete lv->SetUnplacedVolume(original);
+  }
 #endif
   return success;
 }
