@@ -186,8 +186,8 @@ bool AdePTTransport::InitializeGeometry(const vecgeom::cxx::VPlacedVolume *world
         const unsigned int id  = lv->id();
         const bool inGPURegion = (id < numVolumes) && (auxData[id].fGPUregionId >= 0);
         if (inGPURegion) {
-          throw std::runtime_error(std::string("AdePTTransport::InitializeGeometry: volume '") +
-                                   lv->GetName() + "' is inside a GPU region but its shape cannot be "
+          throw std::runtime_error(std::string("AdePTTransport::InitializeGeometry: volume ") +
+                                   lv->GetName() + " is inside a GPU region but its shape cannot be "
                                    "serialized to the GPU. This configuration is not supported.");
         }
         vecgeom::Vector3D<vecgeom::Precision> aMin, aMax;
