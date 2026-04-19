@@ -72,7 +72,8 @@ private:
   void Initialize(adeptint::VolAuxData *auxData, const adeptint::WDTHostPacked &wdtPacked,
                   const std::vector<float> &uniformFieldValues);
   void InitBVH();
-  bool InitializeGeometry(const vecgeom::cxx::VPlacedVolume *world);
+  bool InitializeGeometry(const vecgeom::cxx::VPlacedVolume *world, const adeptint::VolAuxData *auxData,
+                          size_t numVolumes);
   bool InitializePhysics();
 
 public:

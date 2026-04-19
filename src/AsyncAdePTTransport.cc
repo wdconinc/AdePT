@@ -98,7 +98,8 @@ void AsyncAdePTTransport::AddTrack(int pdg, uint64_t trackId, uint64_t parentId,
   fEventStates[threadId].store(EventState::NewTracksFromG4, std::memory_order_release);
 }
 
-bool AsyncAdePTTransport::InitializeGeometry(const vecgeom::cxx::VPlacedVolume *world)
+bool AsyncAdePTTransport::InitializeGeometry(const vecgeom::cxx::VPlacedVolume *world,
+                                             const adeptint::VolAuxData *auxData, size_t numVolumes)
 {
   auto &cudaManager = vecgeom::cxx::CudaManager::Instance();
   async_adept_impl::setDeviceLimits(fCUDAStackLimit, fCUDAHeapLimit);
@@ -120,18 +121,28 @@ bool AsyncAdePTTransport::InitializeGeometry(const vecgeom::cxx::VPlacedVolume *
   cudaManager.SynchronizeNavigationTable();
   async_adept_impl::CopySurfaceModelToGPU();
 #else
-  // Before copying to GPU, replace any volume shapes that cannot be serialized
-  // to GPU (e.g. UnplacedTessellated) with conservative bounding-box
-  // approximations.  GPU tracks only navigate inside GPU-region volumes; they
-  // never enter tessellated HCal or similar structures, so a bounding box is
-  // functionally correct on the device side.
+  // Before copying to GPU, scan all logical volumes and replace any shapes
+  // that cannot be serialized to GPU (DeviceSizeOf() == 0) with conservative
+  // bounding-box approximations.  The decision is region-based:
+  //   - Volume in a GPU region with an incompatible shape: fatal error.
+  //   - Volume outside all GPU regions with an incompatible shape: safe to
+  //     approximate because GPU tracks never navigate inside those volumes.
+  // When fTrackInAllRegions is true the auxData region flags are not used and
+  // every volume must be GPU-serializable, so no substitution is attempted.
   std::vector<std::pair<vecgeom::LogicalVolume *, vecgeom::VUnplacedVolume const *>> replacedVolumes;
-  {
+  if (!fTrackInAllRegions && auxData != nullptr) {
     std::vector<vecgeom::LogicalVolume *> allLV;
     vecgeom::GeoManager::Instance().GetAllLogicalVolumes(allLV);
     for (auto *lv : allLV) {
       const auto *uv = lv->GetUnplacedVolume();
-      if (uv->GetType() == vecgeom::ESolidType::tessellated) {
+      if (uv->DeviceSizeOf() == 0) {
+        const unsigned int id  = lv->id();
+        const bool inGPURegion = (id < numVolumes) && (auxData[id].fGPUregionId >= 0);
+        if (inGPURegion) {
+          throw std::runtime_error(std::string("AsyncAdePTTransport::InitializeGeometry: volume '") +
+                                   lv->GetName() + "' is inside a GPU region but its shape cannot be "
+                                   "serialized to the GPU. This configuration is not supported.");
+        }
         vecgeom::Vector3D<vecgeom::Precision> aMin, aMax;
         uv->Extent(aMin, aMax);
         const auto half = (aMax - aMin) * 0.5;
@@ -141,7 +152,7 @@ bool AsyncAdePTTransport::InitializeGeometry(const vecgeom::cxx::VPlacedVolume *
     }
     if (!replacedVolumes.empty())
       std::cout << "AdePT: Replaced " << replacedVolumes.size()
-                << " tessellated volume(s) with bounding boxes for GPU geometry copy\n";
+                << " volume(s) outside GPU regions with bounding boxes for GPU geometry copy\n";
   }
 
   cudaManager.LoadGeometry(world);
@@ -149,7 +160,7 @@ bool AsyncAdePTTransport::InitializeGeometry(const vecgeom::cxx::VPlacedVolume *
   success        = world_dev != nullptr;
   InitBVH();
 
-  // Restore original CPU-side unplaced volumes; GPU retains the bounding-box copies.
+  // Restore original CPU-side unplaced volumes; the GPU retains the bounding-box copies.
   for (auto &[lv, original] : replacedVolumes) {
     delete lv->SetUnplacedVolume(original);
   }
@@ -178,7 +189,7 @@ void AsyncAdePTTransport::Initialize(adeptint::VolAuxData *auxData, const adepti
     throw std::runtime_error("AsyncAdePTTransport::Initialize: VecGeom geometry not closed.");
 
   const vecgeom::cxx::VPlacedVolume *world = vecgeom::GeoManager::Instance().GetWorld();
-  if (!InitializeGeometry(world))
+  if (!InitializeGeometry(world, auxData, vecgeom::GeoManager::Instance().GetRegisteredVolumesCount()))
     throw std::runtime_error("AsyncAdePTTransport::Initialize: Cannot initialize geometry on GPU");
 
   if (!InitializePhysics())
