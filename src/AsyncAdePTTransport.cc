@@ -146,8 +146,15 @@ bool AsyncAdePTTransport::InitializeGeometry(const vecgeom::cxx::VPlacedVolume *
         }
         vecgeom::Vector3D<vecgeom::Precision> aMin, aMax;
         uv->Extent(aMin, aMax);
-        const auto half = (aMax - aMin) * 0.5;
-        auto *bbox      = new vecgeom::UnplacedBox(std::abs(half.x()), std::abs(half.y()), std::abs(half.z()));
+        // Use max(|aMin|, |aMax|) per axis: the box is centered at origin but
+        // tessellated meshes may not be, so we inflate to cover the full mesh.
+        constexpr vecgeom::Precision kMinHalf = 1.0; // 1 mm in VecGeom units
+        const vecgeom::Precision hx = std::max({std::abs(aMin.x()), std::abs(aMax.x()), kMinHalf});
+        const vecgeom::Precision hy = std::max({std::abs(aMin.y()), std::abs(aMax.y()), kMinHalf});
+        const vecgeom::Precision hz = std::max({std::abs(aMin.z()), std::abs(aMax.z()), kMinHalf});
+        auto *bbox = new vecgeom::UnplacedBox(hx, hy, hz);
+        std::cout << "AdePT: Replacing volume \"" << lv->GetName() << "\" (id=" << lv->id()
+                  << ") with bbox [" << hx << "," << hy << "," << hz << "] mm\n";
         replacedVolumes.push_back({lv, lv->SetUnplacedVolume(bbox)});
       }
     }
