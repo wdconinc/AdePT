@@ -14,9 +14,12 @@
 #include <G4HepEmData.hh>
 #include <G4HepEmParameters.hh>
 
+#include <cuda_runtime.h>
+
 #include <cassert>
 #include <chrono>
 #include <iostream>
+#include <mutex>
 #include <stdexcept>
 
 namespace async_adept_impl {
@@ -121,56 +124,76 @@ bool AsyncAdePTTransport::InitializeGeometry(const vecgeom::cxx::VPlacedVolume *
   cudaManager.SynchronizeNavigationTable();
   async_adept_impl::CopySurfaceModelToGPU();
 #else
-  // Before copying to GPU, scan all logical volumes and replace any shapes
-  // that cannot be serialized to GPU (DeviceSizeOf() == 0) with conservative
-  // bounding-box approximations.  The decision is region-based:
-  //   - Volume in a GPU region with an incompatible shape: fatal error.
-  //   - Volume outside all GPU regions with an incompatible shape: safe to
-  //     approximate because GPU tracks never navigate inside those volumes.
-  // When fTrackInAllRegions is true the auxData region flags are not used and
-  // every volume must be GPU-serializable, so no substitution is attempted.
-  std::vector<std::pair<vecgeom::LogicalVolume *, vecgeom::VUnplacedVolume const *>> replacedVolumes;
-  if (!fTrackInAllRegions && auxData != nullptr) {
-    std::vector<vecgeom::LogicalVolume *> allLV;
-    vecgeom::GeoManager::Instance().GetAllLogicalVolumes(allLV);
-    for (auto *lv : allLV) {
-      const auto *uv = lv->GetUnplacedVolume();
-      if (uv->DeviceSizeOf() == 0) {
-        const unsigned int id  = lv->id();
-        const bool inGPURegion = (id < numVolumes) && (auxData[id].fGPUregionId >= 0);
-        if (inGPURegion) {
-          throw std::runtime_error(std::string("AsyncAdePTTransport::InitializeGeometry: volume ") +
-                                   lv->GetName() + " is inside a GPU region but its shape cannot be "
-                                   "serialized to the GPU. This configuration is not supported.");
+  // GPU geometry is a global resource: only load it once even if
+  // InitializeGeometry() is called from both master and worker thread contexts.
+  static std::once_flag sGPUGeomInitFlag;
+  std::call_once(sGPUGeomInitFlag, [&]() {
+    // Before copying to GPU, scan all logical volumes and replace any shapes
+    // that cannot be serialized to GPU (DeviceSizeOf() == 0) with conservative
+    // bounding-box approximations.  The decision is region-based:
+    //   - Volume in a GPU region with an incompatible shape: fatal error.
+    //   - Volume outside all GPU regions with an incompatible shape: safe to
+    //     approximate because GPU tracks never navigate inside those volumes.
+    // When fTrackInAllRegions is true the auxData region flags are not used and
+    // every volume must be GPU-serializable, so no substitution is attempted.
+    //
+    // The bbox objects must outlive all CudaManager::Synchronize() calls (i.e.,
+    // the entire process lifetime), so they are kept in a static pool rather
+    // than deleted after the restore.
+    static std::vector<const vecgeom::VUnplacedVolume *> sBBoxPool;
+    std::vector<std::pair<vecgeom::LogicalVolume *, vecgeom::VUnplacedVolume const *>> replacedVolumes;
+    if (!fTrackInAllRegions && auxData != nullptr) {
+      std::vector<vecgeom::LogicalVolume *> allLV;
+      vecgeom::GeoManager::Instance().GetAllLogicalVolumes(allLV);
+      for (auto *lv : allLV) {
+        const auto *uv = lv->GetUnplacedVolume();
+        if (uv->DeviceSizeOf() == 0) {
+          const unsigned int id  = lv->id();
+          const bool inGPURegion = (id < numVolumes) && (auxData[id].fGPUregionId >= 0);
+          if (inGPURegion) {
+            throw std::runtime_error(std::string("AsyncAdePTTransport::InitializeGeometry: volume ") +
+                                     lv->GetName() + " is inside a GPU region but its shape cannot be "
+                                     "serialized to the GPU. This configuration is not supported.");
+          }
+          vecgeom::Vector3D<vecgeom::Precision> aMin, aMax;
+          uv->Extent(aMin, aMax);
+          // Use max(|aMin|, |aMax|) per axis: the box is centered at origin but
+          // tessellated meshes may not be, so we inflate to cover the full mesh.
+          constexpr vecgeom::Precision kMinHalf = 1.0; // 1 mm in VecGeom units
+          const vecgeom::Precision hx = std::max({std::abs(aMin.x()), std::abs(aMax.x()), kMinHalf});
+          const vecgeom::Precision hy = std::max({std::abs(aMin.y()), std::abs(aMax.y()), kMinHalf});
+          const vecgeom::Precision hz = std::max({std::abs(aMin.z()), std::abs(aMax.z()), kMinHalf});
+          auto *bbox = new vecgeom::UnplacedBox(hx, hy, hz);
+          std::cout << "AdePT: Replacing volume \"" << lv->GetName() << "\" (id=" << lv->id()
+                    << ") tight extent [" << 2 * hx << "," << 2 * hy << "," << 2 * hz << "] mm"
+                    << " centroid [" << (aMin.x() + aMax.x()) / 2 << "," << (aMin.y() + aMax.y()) / 2 << ","
+                    << (aMin.z() + aMax.z()) / 2 << "] mm\n";
+          replacedVolumes.push_back({lv, lv->SetUnplacedVolume(bbox)});
         }
-        vecgeom::Vector3D<vecgeom::Precision> aMin, aMax;
-        uv->Extent(aMin, aMax);
-        // Use max(|aMin|, |aMax|) per axis: the box is centered at origin but
-        // tessellated meshes may not be, so we inflate to cover the full mesh.
-        constexpr vecgeom::Precision kMinHalf = 1.0; // 1 mm in VecGeom units
-        const vecgeom::Precision hx = std::max({std::abs(aMin.x()), std::abs(aMax.x()), kMinHalf});
-        const vecgeom::Precision hy = std::max({std::abs(aMin.y()), std::abs(aMax.y()), kMinHalf});
-        const vecgeom::Precision hz = std::max({std::abs(aMin.z()), std::abs(aMax.z()), kMinHalf});
-        auto *bbox = new vecgeom::UnplacedBox(hx, hy, hz);
-        std::cout << "AdePT: Replacing volume \"" << lv->GetName() << "\" (id=" << lv->id()
-                  << ") with bbox [" << hx << "," << hy << "," << hz << "] mm\n";
-        replacedVolumes.push_back({lv, lv->SetUnplacedVolume(bbox)});
       }
+      if (!replacedVolumes.empty())
+        std::cout << "AdePT: Replaced " << replacedVolumes.size()
+                  << " volume(s) outside GPU regions with bounding boxes for GPU geometry copy\n";
     }
-    if (!replacedVolumes.empty())
-      std::cout << "AdePT: Replaced " << replacedVolumes.size()
-                << " volume(s) outside GPU regions with bounding boxes for GPU geometry copy\n";
-  }
 
-  cudaManager.LoadGeometry(world);
-  auto world_dev = cudaManager.Synchronize();
-  success        = world_dev != nullptr;
-  InitBVH();
+    cudaManager.LoadGeometry(world);
+    auto world_dev = cudaManager.Synchronize();
+    success        = world_dev != nullptr;
+    fprintf(stderr, "DIAGNOSTIC: after Synchronize(): %s\n", success ? "OK" : "FAILED");
+    InitBVH();
+    fprintf(stderr, "DIAGNOSTIC: after InitBVH(): OK\n");
 
-  // Restore original CPU-side unplaced volumes; the GPU retains the bounding-box copies.
-  for (auto &[lv, original] : replacedVolumes) {
-    delete lv->SetUnplacedVolume(original);
-  }
+    // Restore the original CPU-side unplaced volumes so the host geometry is
+    // consistent.  The bbox objects are kept alive in sBBoxPool for the lifetime
+    // of the process: CudaManager may internally hold references to them even
+    // after Synchronize() returns.
+    for (auto &[lv, original] : replacedVolumes) {
+      sBBoxPool.push_back(lv->SetUnplacedVolume(original));
+    }
+
+    bool navOK = cudaManager.SynchronizeNavigationTable();
+    fprintf(stderr, "DIAGNOSTIC: after SynchronizeNavigationTable(): %s\n", navOK ? "OK" : "FAILED");
+  });
 #endif
   return success;
 }
