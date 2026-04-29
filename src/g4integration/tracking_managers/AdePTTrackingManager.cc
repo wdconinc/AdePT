@@ -158,7 +158,11 @@ void AdePTTrackingManager::InitializeSharedAdePTTransport()
   AdePTGeometryBridge::CheckGeometry(adeptG4HepEmState->GetData());
 
   // Initialize auxiliary per-LV data and collect the raw WDT metadata on the Geant4 side.
-  auto *auxData = new adeptint::VolAuxData[vecgeom::GeoManager::Instance().GetRegisteredVolumesCount()];
+  // Use GetIdCount() rather than GetRegisteredVolumesCount(): logical volume IDs are assigned from a
+  // monotonically increasing counter that is never decremented. Deregistered volumes create gaps so
+  // max_id+1 (GetIdCount) > map size (GetRegisteredVolumesCount). Arrays sized by map count would
+  // be indexed out-of-bounds by NavIndex-stored IDs on the GPU.
+  auto *auxData = new adeptint::VolAuxData[vecgeom::LogicalVolume::GetIdCount()];
   adeptint::WDTHostRaw wdtRaw;
   AdePTGeometryBridge::InitVolAuxData(
       auxData, adeptG4HepEmState->GetData(), fHepEmTrackingManager.get(), fAdePTConfiguration->GetTrackInAllRegions(),

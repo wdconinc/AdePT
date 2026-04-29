@@ -208,7 +208,7 @@ void AdePTGeometryBridge::CheckGeometry(G4HepEmData const *hepEmData)
       G4TransportationManager::GetTransportationManager()->GetNavigatorForTracking()->GetWorldVolume();
   const vecgeom::VPlacedVolume *vecgeomWorld = vecgeom::GeoManager::Instance().GetWorld();
   const int *g4tohepmcindex                  = hepEmData->fTheMatCutData->fG4MCIndexToHepEmMCIndex;
-  const auto nvolumes                        = vecgeom::GeoManager::Instance().GetRegisteredVolumesCount();
+  const auto nvolumes                        = vecgeom::LogicalVolume::GetIdCount();
 
   std::cout << "Visiting geometry ...\n";
   const VisitContext context{g4tohepmcindex, nvolumes, hepEmData};
@@ -255,7 +255,7 @@ void AdePTGeometryBridge::InitVolAuxData(adeptint::VolAuxData *volAuxData, G4Hep
 #endif
 
 #if defined(ADEPT_STEPACTION_TYPE) && (ADEPT_STEPACTION_TYPE == 3)
-  std::vector<bool> atlasPhotonRRInitialized(vecgeom::GeoManager::Instance().GetRegisteredVolumesCount(), false);
+  std::vector<bool> atlasPhotonRRInitialized(vecgeom::LogicalVolume::GetIdCount(), false);
 #endif
 
   // Recursive geometry visitor lambda matching one by one Geant4 and VecGeom logical volumes.

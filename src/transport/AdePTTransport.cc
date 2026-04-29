@@ -181,15 +181,13 @@ bool AdePTTransport::InitializeGeometry(const vecgeom::cxx::VPlacedVolume *world
     //   - Volume in a GPU region with an incompatible shape: fatal error.
     //   - Volume outside all GPU regions with an incompatible shape: safe to
     //     approximate because GPU tracks never navigate inside those volumes.
-    // When fTrackInAllRegions is true the auxData region flags are not used and
-    // every volume must be GPU-serializable, so no substitution is attempted.
     //
     // The bbox objects must outlive all CudaManager::Synchronize() calls (i.e.,
     // the entire process lifetime), so they are kept in a static pool rather
     // than deleted after the restore.
     static std::vector<const vecgeom::VUnplacedVolume *> sBBoxPool;
     std::vector<std::pair<vecgeom::LogicalVolume *, vecgeom::VUnplacedVolume const *>> replacedVolumes;
-    if (!fTrackInAllRegions && auxData != nullptr) {
+    if (auxData != nullptr) {
       std::vector<vecgeom::LogicalVolume *> allLV;
       vecgeom::GeoManager::Instance().GetAllLogicalVolumes(allLV);
       for (auto *lv : allLV) {
@@ -226,9 +224,7 @@ bool AdePTTransport::InitializeGeometry(const vecgeom::cxx::VPlacedVolume *world
     cudaManager.LoadGeometry(world);
     auto world_dev = cudaManager.Synchronize();
     success        = world_dev != nullptr;
-    fprintf(stderr, "DIAGNOSTIC: after Synchronize(): %s\n", success ? "OK" : "FAILED");
     InitBVH();
-    fprintf(stderr, "DIAGNOSTIC: after InitBVH(): OK\n");
 
     // Restore the original CPU-side unplaced volumes so the host geometry is
     // consistent.  The bbox objects are kept alive in sBBoxPool for the lifetime
@@ -238,8 +234,7 @@ bool AdePTTransport::InitializeGeometry(const vecgeom::cxx::VPlacedVolume *world
       sBBoxPool.push_back(lv->SetUnplacedVolume(original));
     }
 
-    bool navOK = cudaManager.SynchronizeNavigationTable();
-    fprintf(stderr, "DIAGNOSTIC: after SynchronizeNavigationTable(): %s\n", navOK ? "OK" : "FAILED");
+    if (!cudaManager.SynchronizeNavigationTable()) success = false;
   });
 #endif
   return success;
@@ -258,7 +253,7 @@ bool AdePTTransport::InitializePhysics()
 void AdePTTransport::Initialize(adeptint::VolAuxData *auxData, const adeptint::WDTHostPacked &wdtPacked,
                                 const std::vector<float> &uniformFieldValues)
 {
-  if (vecgeom::GeoManager::Instance().GetRegisteredVolumesCount() == 0)
+  if (vecgeom::LogicalVolume::GetIdCount() == 0)
     throw std::runtime_error("AdePTTransport::Initialize: Number of geometry volumes is zero.");
 
   std::cout << "=== AdePTTransport: initializing geometry and physics\n";
@@ -266,12 +261,19 @@ void AdePTTransport::Initialize(adeptint::VolAuxData *auxData, const adeptint::W
     throw std::runtime_error("AdePTTransport::Initialize: VecGeom geometry not closed.");
 
   const vecgeom::cxx::VPlacedVolume *world = vecgeom::GeoManager::Instance().GetWorld();
-  if (!InitializeGeometry(world, auxData, vecgeom::GeoManager::Instance().GetRegisteredVolumesCount()))
+  if (!InitializeGeometry(world, auxData, vecgeom::LogicalVolume::GetIdCount()))
     throw std::runtime_error("AdePTTransport::Initialize: Cannot initialize geometry on GPU");
 
   if (!InitializePhysics()) throw std::runtime_error("AdePTTransport::Initialize cannot initialize physics on GPU");
 
-  const auto numVolumes   = vecgeom::GeoManager::Instance().GetRegisteredVolumesCount();
+  const auto numVolumes   = vecgeom::LogicalVolume::GetIdCount();
+  {
+    const auto regCount = vecgeom::GeoManager::Instance().GetRegisteredVolumesCount();
+    if (numVolumes != (unsigned)regCount)
+      std::cout << "AdePT::Initialize: NOTE - GetIdCount=" << numVolumes
+                << " vs GetRegisteredVolumesCount=" << regCount
+                << ". IDs not contiguous; using GetIdCount for array sizing.\n";
+  }
   auto &volAuxArray       = adeptint::VolAuxArray::GetInstance();
   volAuxArray.fNumVolumes = numVolumes;
   volAuxArray.fAuxData    = auxData;
