@@ -5,11 +5,9 @@
 
 #include <G4HepEmConfig.hh>
 #include <G4HepEmData.hh>
-#include <G4HepEmElectronInit.hh>
-#include <G4HepEmGammaInit.hh>
-#include <G4HepEmMaterialInit.hh>
 #include <G4HepEmMatCutData.hh>
 #include <G4HepEmParameters.hh>
+#include <G4HepEmRunManager.hh>
 #include <G4ios.hh>
 
 #include <algorithm>
@@ -24,7 +22,7 @@ namespace AsyncAdePT {
 /// deep cleanup before the outer `G4HepEmData` allocation itself can be deleted.
 void AdePTG4HepEmState::DataDeleter::operator()(G4HepEmData *data) const
 {
-  if (data == nullptr) return;
+  if (!owned || data == nullptr) return;
   FreeG4HepEmData(data);
   delete data;
 }
@@ -43,18 +41,22 @@ void AdePTG4HepEmState::ParametersDeleter::operator()(G4HepEmParameters *paramet
   delete parameters;
 }
 
-/// @brief Rebuild a complete AdePT-owned set of host-side G4HepEm inputs from the supplied config.
+/// @brief Prepare the AdePT host-side G4HepEm inputs by borrowing from the already-initialized
+///        master G4HepEmRunManager and deep-copying the G4HepEmParameters from the supplied config.
 /// @details
-/// `AdePTG4HepEmState` owns two different G4HepEm objects:
-/// - a deep copy of the `G4HepEmParameters` stored in the supplied `G4HepEmConfig`
-/// - a freshly rebuilt `G4HepEmData` derived from that copied parameter block
-///
-/// We must copy `G4HepEmParameters` because the original object remains owned by
-/// the worker-local `G4HepEmConfig`, while the shared AdePT transport can outlive
-/// the worker that first created it. `G4HepEmData` is rebuilt here directly, so
-/// it is already fully owned by AdePT and does not need a second copy step.
+/// `AdePTG4HepEmState` holds two G4HepEm objects:
+/// - a borrowed (non-owning) pointer to the `G4HepEmData` owned by the master
+///   `G4HepEmRunManager`. The master built these tables during Geant4 physics-list
+///   initialization; rebuilding them here would duplicate the entire cross-section
+///   table construction (which can exceed 10 minutes for complex geometries such as
+///   ePIC no_bhcal). The master RunManager is responsible for freeing this data at
+///   Geant4 shutdown, after AdePT transport has already been destroyed.
+/// - a deep copy of the `G4HepEmParameters` stored in the supplied `G4HepEmConfig`.
+///   We must copy the parameters because the original object remains owned by the
+///   worker-local `G4HepEmConfig`, while the shared AdePT transport can outlive
+///   the worker that first created it.
 AdePTG4HepEmState::AdePTG4HepEmState(G4HepEmConfig *hepEmConfig)
-    : fData(new G4HepEmData), fParameters(new G4HepEmParameters)
+    : fData(nullptr, DataDeleter{false}), fParameters(new G4HepEmParameters)
 {
   if (hepEmConfig == nullptr) {
     throw std::runtime_error("AdePTG4HepEmState requires a non-null G4HepEmConfig.");
@@ -81,15 +83,14 @@ AdePTG4HepEmState::AdePTG4HepEmState(G4HepEmConfig *hepEmConfig)
                 fParameters->fParametersPerRegion);
   }
 
-  // Rebuild the G4HepEmData tables from the copied G4HepEmParameters so the
-  // transport owns a complete, self-contained set of host-side inputs.
-  InitG4HepEmData(fData.get());
-  InitMaterialAndCoupleData(fData.get(), fParameters.get());
-
-  // Build all EM species
-  InitElectronData(fData.get(), fParameters.get(), true);
-  InitElectronData(fData.get(), fParameters.get(), false);
-  InitGammaData(fData.get(), fParameters.get());
+  // Borrow the already-initialized G4HepEmData from the master G4HepEmRunManager
+  // instead of rebuilding it. Rebuilding would duplicate the full cross-section
+  // table construction that Geant4's physics-list initialization already performed.
+  G4HepEmRunManager *masterRM = G4HepEmRunManager::GetMasterRunManager();
+  if (masterRM == nullptr || masterRM->GetHepEmData() == nullptr) {
+    throw std::runtime_error("AdePTG4HepEmState: master G4HepEmRunManager has no initialized G4HepEmData.");
+  }
+  fData.reset(masterRM->GetHepEmData());
 
   G4HepEmMatCutData *cutData = fData->fTheMatCutData;
   G4cout << "fNumG4MatCuts = " << cutData->fNumG4MatCuts << ", fNumMatCutData = " << cutData->fNumMatCutData << G4endl;
